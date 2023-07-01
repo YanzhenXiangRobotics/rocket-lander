@@ -8,7 +8,7 @@ Description: This is the rocket lander simulation built on top of the gym lunar 
 from Box2D.b2 import (edgeShape, circleShape, fixtureDef, polygonShape, revoluteJointDef, contactListener)
 import numpy as np
 import Box2D
-from gym.envs.classic_control import rendering
+# from gym.envs.classic_control import rendering
 import gym
 from gym import spaces
 from gym.utils import seeding
@@ -91,7 +91,7 @@ class RocketLander(gym.Env):
         self.np_random, returned_seed = seeding.np_random(seed)
         return returned_seed
 
-    def _reset(self):
+    def reset(self):
         self._destroy()
         self.game_over = False
         self.world.contactListener_keepref = ContactDetector(self)
