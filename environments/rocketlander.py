@@ -8,7 +8,7 @@ Description: This is the rocket lander simulation built on top of the gym lunar 
 from Box2D.b2 import (edgeShape, circleShape, fixtureDef, polygonShape, revoluteJointDef, contactListener)
 import numpy as np
 import Box2D
-# from gym.envs.classic_control import rendering
+from gym.envs.classic_control import rendering
 import gym
 from gym import spaces
 from gym.utils import seeding
@@ -138,7 +138,7 @@ class RocketLander(gym.Env):
             self.adjust_dynamics(y_dot=y_dot, x_dot=x_dot, theta=theta, theta_dot=theta_dot)
 
         # Step through one action = [0, 0, 0] and return the state, reward etc.
-        return self._step(np.array([0, 0, 0]))[0]
+        return self.step(np.array([0, 0, 0]))[0]
 
     def _destroy(self):
         if not self.main_base: return
@@ -151,7 +151,7 @@ class RocketLander(gym.Env):
         self.world.DestroyBody(self.legs[0])
         self.world.DestroyBody(self.legs[1])
 
-    def _step(self, action):
+    def step(self, action):
         assert len(action) == 3  # Fe, Fs, psi
 
         # Check for contact with the ground
@@ -647,7 +647,7 @@ class RocketLander(gym.Env):
 
     """ RENDERING """
 
-    def _render(self, mode='human', close=False):
+    def render(self, mode='human', close=False):
         if close:
             if self.viewer is not None:
                 self.viewer.close()
