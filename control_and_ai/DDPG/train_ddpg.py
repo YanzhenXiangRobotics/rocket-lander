@@ -3,7 +3,8 @@ Author: Reuben Ferrante
 Date:   10/05/2017
 Description: Train DDPG network.
 """
-
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__),"..",".."))
 import tensorflow as tf
 from control_and_ai.DDPG.ddpg import DDPG
 from control_and_ai.DDPG.train import set_up

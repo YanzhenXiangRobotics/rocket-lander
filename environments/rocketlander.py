@@ -15,6 +15,8 @@ from gym.utils import seeding
 import logging
 import pyglet
 from itertools import chain
+import os, sys
+sys.path.append(os.path.dirname(__file__))
 from constants import *
 
 
