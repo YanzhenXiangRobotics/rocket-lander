@@ -8,7 +8,8 @@ import sys
 import os
 import shutil
 import argparse
-sys.path.append('C://Users//REUBS_LEN//PycharmProjects//RocketLanding')
+# sys.path.append('C://Users//xyz00//OneDrive//Desktop//RocketLanding')
+sys.path.append(os.path.join(os.path.dirname(__file__),"..",".."))
 from environments.rocketlander import get_state_sample
 from constants import *
 from .utils import Utils
@@ -33,6 +34,8 @@ def train(env, agent, FLAGS):
 
         s = env.reset()
         state = env.get_state_with_barge_and_landing_coordinates(untransformed_state=False)
+        state = state[:8]
+        # print(state,"\n\n\n\n\n")
         max_steps = 1000
 
         left_or_right_barge_movement = np.random.randint(0, 2)
@@ -50,6 +53,7 @@ def train(env, agent, FLAGS):
             # take it
             s, reward, done, _ = env.step(action[0])
             state = env.get_state_with_barge_and_landing_coordinates(untransformed_state=False)
+            state = state[:8]
             total_reward += reward
 
             if s[LEFT_GROUND_CONTACT] == 0 and s[RIGHT_GROUND_CONTACT] == 0:

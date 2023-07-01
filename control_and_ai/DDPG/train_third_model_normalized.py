@@ -8,7 +8,8 @@ import sys
 import os
 import shutil
 import argparse
-sys.path.append('C://Users//REUBS_LEN//PycharmProjects//RocketLanding')
+# sys.path.append('C://Users//xyz00//OneDrive//Desktop//RocketLanding')
+sys.path.append(os.path.join(os.path.dirname(__file__),"..",".."))
 from environments.rocketlander import get_state_sample
 from constants import *
 from .utils import Utils

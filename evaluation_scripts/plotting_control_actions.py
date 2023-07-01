@@ -7,7 +7,7 @@ Description: General scripts for graphing instead of notebook.
 from plotting.plotty import  *
 import numpy as np
 
-# action_history = np.load('C://Users//REUBS_LEN//PycharmProjects//RocketLanding//control_and_ai//evaluation_scripts//pid//action_history.npy')
+# action_history = np.load('C://Users//xyz00//OneDrive//Desktop//rocket-lander//control_and_ai//control_and_ai//evaluation_scripts//pid//action_history.npy')
 # res = Graphing(plot_colors=['royalblue','darkorange','limegreen'], fig_size=(9,5))
 # fig = res.create_figure()
 #
@@ -23,7 +23,7 @@ import numpy as np
 #
 # plt.show()
 
-action_history = np.load('C://Users//REUBS_LEN//PycharmProjects//RocketLanding//control_and_ai//evaluation_scripts//mpc//planned_actions_1.npy')
+action_history = np.load('C://Users//xyz00//OneDrive//Desktop//rocket-lander//control_and_ai//control_and_ai//evaluation_scripts//mpc//planned_actions_1.npy')
 res = Graphing(plot_colors=['royalblue','darkorange','limegreen'], fig_size=(9,5))
 fig = res.create_figure()
 

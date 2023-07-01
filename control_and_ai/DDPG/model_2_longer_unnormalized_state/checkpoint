@@ -1,5 +1,2 @@
-model_checkpoint_path: "C://Users//REUBS_LEN//PycharmProjects//RocketLanding//DDPG//model_2_longer_unnormalized_state/DDPG.ckpt-200"
-all_model_checkpoint_paths: "C://Users//REUBS_LEN//PycharmProjects//RocketLanding//DDPG//model_2_longer_unnormalized_state/DDPG.ckpt-50"
-all_model_checkpoint_paths: "C://Users//REUBS_LEN//PycharmProjects//RocketLanding//DDPG//model_2_longer_unnormalized_state/DDPG.ckpt-100"
-all_model_checkpoint_paths: "C://Users//REUBS_LEN//PycharmProjects//RocketLanding//DDPG//model_2_longer_unnormalized_state/DDPG.ckpt-150"
-all_model_checkpoint_paths: "C://Users//REUBS_LEN//PycharmProjects//RocketLanding//DDPG//model_2_longer_unnormalized_state/DDPG.ckpt-200"
+model_checkpoint_path: "c:/Users/xyz00/OneDrive/Desktop/rocket-lander/control_and_ai/DDPG\\model_2_longer_unnormalized_state/DDPG.ckpt-50"
+all_model_checkpoint_paths: "c:/Users/xyz00/OneDrive/Desktop/rocket-lander/control_and_ai/DDPG\\model_2_longer_unnormalized_state/DDPG.ckpt-50"

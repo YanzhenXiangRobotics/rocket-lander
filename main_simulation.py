@@ -7,17 +7,20 @@ Description: This is the  main running point of the simulation. Set settings, al
 from environments.rocketlander import RocketLander
 from constants import LEFT_GROUND_CONTACT, RIGHT_GROUND_CONTACT
 import numpy as np
+# from control_and_ai.DDPG.utils import Utils
 
 if __name__ == "__main__":
     # Settings holds all the settings for the rocket lander environment.
     settings = {'Side Engines': True,
                 'Clouds': True,
                 'Vectorized Nozzle': True,
-                'Starting Y-Pos Constant': 1,
+                'Starting Y-Pos Constant': 1.0,
+                # 'Initial Coordinates': (0.5,0.8,0,1),
                 'Initial Force': 'random'}  # (6000, -10000)}
 
     env = RocketLander(settings)
     s = env.reset()
+    print(s)
 
     from control_and_ai.pid import PID_Benchmark
 
@@ -44,11 +47,11 @@ if __name__ == "__main__":
             env.refresh(render=False)
 
             # When should the barge move? Water movement, dynamics etc can be simulated here.
-            if s[LEFT_GROUND_CONTACT] == 0 and s[RIGHT_GROUND_CONTACT] == 0:
-                env.move_barge_randomly(epsilon, left_or_right_barge_movement)
-                # Random Force on rocket to simulate wind.
-                env.apply_random_x_disturbance(epsilon=0.005, left_or_right=left_or_right_barge_movement)
-                env.apply_random_y_disturbance(epsilon=0.005)
+            # if s[LEFT_GROUND_CONTACT] == 0 and s[RIGHT_GROUND_CONTACT] == 0:
+            #     env.move_barge_randomly(epsilon, left_or_right_barge_movement)
+            #     # Random Force on rocket to simulate wind.
+            #     env.apply_random_x_disturbance(epsilon=0.005, left_or_right=left_or_right_barge_movement)
+            #     env.apply_random_y_disturbance(epsilon=0.005)
 
             # Touch down or pass abs(THETA_LIMIT)
             if done:

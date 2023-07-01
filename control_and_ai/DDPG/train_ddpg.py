@@ -37,10 +37,11 @@ simulation_settings = {'Side Engines': True,
 env = RocketLander(simulation_settings)
 #env = wrappers.Monitor(env, '/tmp/contlunarlander', force=True, write_upon_reset=True)
 
-FLAGS.retrain = False # Restore weights if False
+FLAGS.retrain = True # Restore weights if False
 FLAGS.test = False
 FLAGS.num_episodes = 500
-model_dir = 'C://Users//REUBS_LEN//PycharmProjects//RocketLanding//DDPG//model_2_longer_unnormalized_state'
+# model_dir = 'C://Users//xyz00//OneDrive//Desktop//rocket-lander//control_and_ai//DDPG//model_2_longer_unnormalized_state'
+model_dir = os.path.join(os.path.dirname(__file__),"model_2_longer_unnormalized_state")
 with tf.device('/cpu:0'):
     agent = DDPG(
         action_bounds,

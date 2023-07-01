@@ -3,6 +3,8 @@ Author: Reuben Ferrante
 Date:   10/05/2017
 Description: Train DDPG network in a different way.
 """
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__),"..",".."))
 
 from control_and_ai.DDPG.ddpg import DDPG
 from control_and_ai.DDPG.train import set_up
@@ -36,7 +38,8 @@ env = RocketLander(simulation_settings)
 FLAGS.retrain = True # Restore weights if False
 FLAGS.test = False
 FLAGS.num_episodes = 300
-model_dir = 'C://Users//REUBS_LEN//PycharmProjects//RocketLanding//DDPG//models_unlimited_episodes_full_normalized_normal_state'
+# model_dir = 'C://Users//xyz00//OneDrive//Desktop//rocket-lander//control_and_ai//DDPG//models_unlimited_episodes_full_normalized_normal_state'
+model_dir = os.path.join(os.path.dirname(__file__),"models_unlimited_episodes_full_normalized_normal_state")
 
 agent = DDPG(
     action_bounds,

@@ -131,7 +131,9 @@ load_path = 'rl_linear_function_approximation_increased_Fe_and_psi.p'
 save_path = 'rl_linear_function_approximation_increased_Fe_and_psi.p'
 rocket_rl_function_approximation(RocketLander(simulation_settings), settings=simulation_settings, logger=logger, load_path=load_path, save_path=save_path)
 # ----------------------------------------------------------------------------
-filepath = 'C://Users//REUBS_LEN//PycharmProjects//RocketLanding//weights_es_fixed_psi_momentum_learning.npy'
+import os
+filepath = os.path.join(os.path.dirname(__file__),"..","..","weights_es_fixed_psi_momentum_learning.npy")
+# filepath = 'C://Users//xyz00//OneDrive//Desktop//rocket-lander//control_and_ai//weights_es_fixed_psi_momentum_learning.npy'
 evolutionary_network_fixed_psi_momentum(simulation_settings, load_path=filepath, save_path=filepath) # Training
 
 
