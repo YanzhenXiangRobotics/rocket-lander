@@ -10,17 +10,14 @@ import numpy as np
 
 if __name__ == "__main__":
     # Settings holds all the settings for the rocket lander environment.
-    # settings = {'Side Engines': True,
-    #             'Clouds': True,
-    #             'Vectorized Nozzle': True,
-    #             'Starting Y-Pos Constant': 1,
-    #             'Initial Force': 'random'}  # (6000, -10000)}
-    args = {
-    "initial_position": (0.5, 0.7, 0.15)
-    }
+    settings = {'Side Engines': True,
+                'Clouds': True,
+                'Vectorized Nozzle': True,
+                'Starting Y-Pos Constant': 1,
+                'Initial Force': 'random'}  # (6000, -10000)}
 
-    env = RocketLander(args=args, render_mode="rgb_array")
-    s, _ = env.reset()
+    env = RocketLander(settings)
+    s = env.reset()
 
     from control_and_ai.pid import PID_Benchmark
 
@@ -35,9 +32,8 @@ if __name__ == "__main__":
     for episode in range(episode_number):
         while (1):
             a = pid.pid_algorithm(s) # pass the state to the algorithm, get the actions
-            a = np.array(a)
             # Step through the simulation (1 step). Refer to Simulation Update in constants.py
-            s, r, done, _, info = env.step(a)
+            s, r, done, info = env.step(a)
             total_reward += r   # Accumulate reward
             # -------------------------------------
             # Optional render

@@ -1,963 +1,586 @@
 """
-A Box2D environment for Gymnasium which emulates the Falcon 9 barge landing
-Original environment created by Reuben Ferrante
-
-Modifications by Dylan Vogel and Gerasimos Maltezos for the 2023 Computational Control course offered at ETH Zurich
-
+Author: Reuben Ferrante
+Date:   10/05/2017
+Description: This is the rocket lander simulation built on top of the gym lunar lander. It's made to be a continuous
+             action problem (as opposed to discretized).
 """
-import copy
-import warnings
-from typing import Dict, List, Tuple
 
-import Box2D
-import gymnasium as gym
+from Box2D.b2 import (edgeShape, circleShape, fixtureDef, polygonShape, revoluteJointDef, contactListener)
 import numpy as np
-import pygame
-from Box2D.b2 import (
-    circleShape,
-    contactListener,
-    edgeShape,
-    fixtureDef,
-    polygonShape,
-    revoluteJointDef,
-)
-from gymnasium import spaces
-import sys, os
-sys.path.append(os.path.dirname(__file__))
-from env_cfg import EnvConfig, State, UserArgs
-
-# for warnings
-YELLOW = "\x1b[33;20m"
-ENDL = "\x1b[0m"
-
-# for referencing different parts of the state
-DEGTORAD = np.pi / 180
-XX = State.x.value
-YY = State.y.value
-X_DOT = State.x_dot.value
-Y_DOT = State.y_dot.value
-THETA = State.theta.value
-THETA_DOT = State.theta_dot.value
-LEFT_GROUND_CONTACT = State.left_ground_contact.value
-RIGHT_GROUND_CONTACT = State.right_ground_contact.value
+import Box2D
+# from gym.envs.classic_control import rendering
+import gym
+from gym import spaces
+from gym.utils import seeding
+import logging
+import pyglet
+from itertools import chain
+from constants import *
 
 
-## CONTACT DETECTOR
-
-
+# This contact detector is equivalent the one implemented in Lunar Lander
 class ContactDetector(contactListener):
-    """Callback class for making/braking contact in the environment"""
-
-    def __init__(self, env: gym.Env):
-        """Constructor method
-
-        Args:
-            env (gym.Env): gym environment to listen on
-        """
+    """
+    Creates a contact listener to check when the rocket touches down.
+    """
+    def __init__(self, env):
         contactListener.__init__(self)
         self.env = env
 
-    def BeginContact(self, contact):
-        """Called when contact between two bodies begins in the environment"""
-        if (
-            self.env.lander == contact.fixtureA.body
-            or self.env.lander == contact.fixtureB.body
-        ):
+    def begin_contact(self, contact):
+        if self.env.lander == contact.fixtureA.body or self.env.lander == contact.fixtureB.body:
             self.env.game_over = True
-
         for i in range(2):
             if self.env.legs[i] in [contact.fixtureA.body, contact.fixtureB.body]:
                 self.env.legs[i].ground_contact = True
-                if self.env.barge not in [contact.fixtureA.body, contact.fixtureB.body]:
-                    self.env.game_over = True
 
-    def EndContact(self, contact):
-        """Called when contact betwene two bodies ends in the environment"""
+    def end_contact(self, contact):
         for i in range(2):
             if self.env.legs[i] in [contact.fixtureA.body, contact.fixtureB.body]:
                 self.env.legs[i].ground_contact = False
 
 
-## GYMNASIUM METHODS
-
-
 class RocketLander(gym.Env):
-    """Gymnasum environment which models a Falcon 9 barge landing"""
+    """
+    Continuous VTOL of a rocket.
+    """
+    metadata = {
+        'render.modes': ['human', 'rgb_array'],
+        'video.frames_per_second': FPS
+    }
 
-    # required by gymnasium
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
+    def __init__(self, settings):
+        self._seed()
+        self.viewer = None
+        self.world = Box2D.b2World(gravity=(0, -GRAVITY))
+        self.main_base = None
+        self.barge_base = None
+        self.CONTACT_FLAG = False
 
-    def __init__(self, args: Dict, render_mode=None):
-        """Constructor method"""
-        # load the environment configuration
-        self.cfg = EnvConfig()
-        self.args = UserArgs(**args)
+        self.minimum_barge_height = 0
+        self.maximum_barge_height = 0
+        self.landing_coordinates = []
 
-        # environment
-        self.world = Box2D.b2World(gravity=(0, self.cfg.gravity))
-
-        # set gymnasium action and observation spaces
-        self.action_space = spaces.Box(
-            low=np.array(
-                [
-                    self.cfg.main_engine_thrust_limits[0],
-                    self.cfg.side_engine_thrust_limits[0],
-                    self.cfg.nozzle_angle_limits[0],
-                ]
-            ),
-            high=np.array(
-                [
-                    self.cfg.main_engine_thrust_limits[1],
-                    self.cfg.side_engine_thrust_limits[1],
-                    self.cfg.nozzle_angle_limits[1],
-                ]
-            ),
-            dtype=np.float64,
-        )
-        self.observation_space = spaces.Box(
-            low=np.array(
-                [0, 0, -np.inf, -np.inf, -self.cfg.theta_limit, -np.inf, 0, 0]
-            ),
-            high=np.array(
-                [
-                    self.cfg.width,
-                    self.cfg.height,
-                    np.inf,
-                    np.inf,
-                    self.cfg.theta_limit,
-                    -np.inf,
-                    1,
-                    1,
-                ]
-            ),
-            dtype=np.float64,
-        )
-
-        # bodies
         self.lander = None
-        self.legs = []
-        self.nozzle = None
-        self.barge = None
         self.particles = []
-        self.lander_drawlist = []
-
-        # polygons
-        self.sea = None
-        self.sea_polys = []
-        self.sky_polys = []
-        self.clouds = []
-
-        # rendering
-        assert render_mode is None or render_mode in self.metadata["render_modes"]
-        self.render_mode = render_mode
-        self.window = None
-        self.clock = None
-        self.canvas = None
-
-        # state variables
         self.state = []
-        self.previous_state = None
-        self.game_over = False
-        self.contact_flag = False
         self.prev_shaping = None
-        self.wind_idx = None
-        self.barge_idx = None
 
-        self.initial_barge_position = None
+        if settings.get('Observation Space Size'):
+            self.observation_space = spaces.Box(-np.inf, +np.inf, (settings.get('Observation Space Size'),))
+        else:
+            self.observation_space = spaces.Box(-np.inf, +np.inf, (8,))
+        self.lander_tilt_angle_limit = THETA_LIMIT
+
+        self.game_over = False
+
+        self.settings = settings
+        self.dynamicLabels = {}
+        self.staticLabels = {}
+
+        self.impulsePos = (0, 0)
+
+        self.action_space = [0, 0, 0]       # Main Engine, Nozzle Angle, Left/Right Engine
+        self.untransformed_state = [0] * 6  # Non-normalized state
 
         self.reset()
 
-    def reset(self, seed=None, options=None):
-        """Reset the environment"""
-        super().reset(seed=seed)
-        np.random.seed(seed=seed)
+    """ INHERITED """
 
+    def _seed(self, seed=None):
+        self.np_random, returned_seed = seeding.np_random(seed)
+        return returned_seed
+
+    def reset(self):
         self._destroy()
-        self.world.contactListener = ContactDetector(self)
-
-        # state variables
-        self.state = []
         self.game_over = False
-        self.contact_flag = False
-        self.prev_shaping = None
-        self.wind_idx = np.random.randint(low=-9999, high=9999)
-        self.barge_idx = np.random.randint(low=-9999, high=9999)
+        self.world.contactListener_keepref = ContactDetector(self)
+        self.world.contactListener = self.world.contactListener_keepref
 
-        # rendering
-        self.lander_drawlist = []
+        smoothed_terrain_edges, terrain_divider_coordinates_x = self._create_terrain(TERRAIN_CHUNKS)
 
-        # set rocket initial position
-        new_state = None
+        self.initial_mass = 0
+        self.remaining_fuel = 0
+        self.prev_shaping = 0
+        self.CONTACT_FLAG = False
 
-        # NOTE:
-        # - Directly setting the position of dynamic box2-py objects results in strange behaviour
-        # - We simply create the rocket at the correct initial position
-        # - Other state values can be set relatively error-free
-        pos_x, pos_y = 0.5 * self.cfg.width, 0.9 * self.cfg.height
+        # Engine Stats
+        self.action_history = []
 
-        if self.args.initial_state is not None:
-            assert (
-                len(self.args.initial_state) == 6
-            ), "Initial state is of incorrect length, should be length 6"
-            if self.args.random_initial_position:
-                warnings.warn(
-                    YELLOW
-                    + "WARN: initial_state is set but the initial position will be randomized"
-                    + ENDL
-                )
-            if self.args.initial_position:
-                warnings.warn(
-                    YELLOW
-                    + "WARN: ignoring the initial_position setting since initial_state is set"
-                    + ENDL
-                )
+        # gradient of 0.009
+        # Reference y-trajectory
+        self.y_pos_ref = [1, 0.8, 0.6, 0.4, 0.3, 0.2, 0.15, 0.1]
+        self.y_pos_speed = [-1.9, -1.8, -1.64, -1.5, -1.5, -1.3, -1.0, -0.9]
+        self.y_pos_flags = [False for _ in self.y_pos_ref]
 
-            pos_x = self.args.initial_state[0] * self.cfg.width
-            pos_y = self.args.initial_state[1] * self.cfg.height
-
-            new_state = {
-                "x_dot": self.args.initial_state[2],
-                "y_dot": self.args.initial_state[3],
-                "theta": self.args.initial_state[4],
-                "theta_dot": self.args.initial_state[5],
-            }
-
-        elif self.args.initial_position is not None:
-            assert (
-                len(self.args.initial_position) == 3
-            ), "Initial position is of incorrect length, should be length 3 (x, y, theta)"
-            if self.args.random_initial_position:
-                warnings.warn(
-                    YELLOW
-                    + "WARN: initial_state is set but the initial position will be randomized"
-                    + ENDL
-                )
-
-            pos_x = self.args.initial_position[0] * self.cfg.width
-            pos_y = self.args.initial_position[1] * self.cfg.height
-
-            new_state = {
-                "theta": self.args.initial_position[2],
-            }
-
-        if self.args.random_initial_position:
-            pos_x = np.random.uniform(0, 1) * self.cfg.width
-            pos_y = np.random.uniform(0.4, 1) * self.cfg.height
-            new_state = {"theta": np.random.uniform(-1, 1) * (self.cfg.theta_limit / 2)}
-
-        # create dynamic bodies
-        self._create_rocket(pos_x, pos_y)
-        self.lander_drawlist = self.legs + [self.nozzle] + [self.lander]
-
-        # create environment objects
-        sea_y_values, sea_x_values = self._create_sea_height(self.cfg.sea_chunks_x)
-        self._create_environment(sea_y_values, sea_x_values)
+        # Create the simulation objects
         self._create_clouds()
         self._create_barge()
+        self._create_base_static_edges(TERRAIN_CHUNKS, smoothed_terrain_edges, terrain_divider_coordinates_x)
 
-        if self.args.initial_barge_position is not None:
-            self.barge.position = (
-                self.args.initial_barge_position[0] * self.cfg.width,
-                self.barge.position[1],
-            )
-            self.barge.angle = self.args.initial_barge_position[1]
+        # Adjust the initial coordinates of the rocket
+        initial_coordinates = self.settings.get('Initial Coordinates')
+        if initial_coordinates is not None:
+            xx, yy, randomness_degree, normalized = initial_coordinates
+            x = xx * W + np.random.uniform(-randomness_degree, randomness_degree)
+            y = yy * H + np.random.uniform(-randomness_degree, randomness_degree)
+            if not normalized:
+                x = x / W
+                y = y / H
+        else:
+            x, y = W / 2 + np.random.uniform(-0.1, 0.1), H / self.settings['Starting Y-Pos Constant']
+        self.initial_coordinates = (x, y)
 
-        self.initial_barge_position = list(self.barge.position) + [
-            float(self.barge.angle)
-        ]
+        self._create_rocket(self.initial_coordinates)
 
-        if new_state is not None:
-            self.adjust_dynamics(self.lander, **new_state)
+        if self.settings.get('Initial State'):
+            x, y, x_dot, y_dot, theta, theta_dot = self.settings.get('Initial State')
+            self.adjust_dynamics(y_dot=y_dot, x_dot=x_dot, theta=theta, theta_dot=theta_dot)
 
-        obs, _, _, _, info = self.step(np.array([0, 0, 0]))
-        return obs, info
-
-    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        """Simulate the environment forward by one step
-
-        Args:
-            action (np.ndarray): actions to apply
-
-        Returns:
-            Tuple[np.ndarray, float, bool, bool, dict]: observation, reward, done, _, info
-        """
-        if isinstance(action, list):
-            action = np.array(action)
-
-        assert (
-            action.shape == self.action_space.shape
-        ), f"Incorrect action shape, expected: {self.action_space.shape} but got: {action.shape}"
-
-        # adjust nozzle angle
-        nozzle_angle = float(action[2])
-        nozzle_angle = (
-            np.clip(
-                nozzle_angle,
-                a_min=self.cfg.nozzle_angle_limits[0],
-                a_max=self.cfg.nozzle_angle_limits[1],
-            )
-            * self.cfg.max_nozzle_angle
-        )
-        self.nozzle.angle = self.lander.angle + nozzle_angle
-
-        # apply forces
-        _ = self.__main_engines_force_computation(action)
-        _, _ = self.__side_engines_force_computation(action)
-
-        # apply disturbances
-        self.__apply_wind_disturbance()
-        self.__apply_barge_disturbance()
-
-        # perform simulation step
-        self.previous_state = self.state
-        self.state = self.__generate_state()
-        self._update_particles()  # delete old particles; aesthetic
-
-        reward = self.__compute_reward(self.state, action)
-
-        # check ground contact
-        if (
-            self.legs[0].ground_contact or self.legs[1].ground_contact
-        ) and self.contact_flag is False:
-            self.contact_flag = True
-
-        # check termination conditions
-        # add a small factor in case the controller goes right to the edge
-        done = False
-        if any(
-            [
-                self.game_over,
-                abs(self.state[THETA]) > self.cfg.theta_limit + 0.1,
-                self.state[XX] > self.cfg.width + 0.1,
-                self.state[XX] < 0 - 0.1,
-                self.state[YY] > self.cfg.height + 0.1,
-            ]
-        ):
-            done = True
-            reward = -100
-
-        # check if simulation finished in general
-        if not self.lander.awake:
-            done = True
-            reward = +100
-
-        # render if necessary
-        if self.render_mode == "human":
-            self._render_frame()
-
-        return (
-            np.array(self.state),
-            reward,
-            done,
-            False,
-            {},
-        )
-
-    def close(self):
-        super().close()
-        self._destroy()
-        if self.window is not None:
-            pygame.display.quit()
-
-    ## QUERY FUNCTIONS
-
-    def get_mass_properties(self) -> Tuple[float, float]:
-        """Get approximate mass and inertia of rocket body
-        We assume that most of the inertia is in the main body (rectangle) and neglect
-        contributions of the lander legs and nozzle
-
-        Returns:
-            Tuple[float, float]: mass, inertia
-        """
-        return (
-            self.lander.mass + self.nozzle.mass + self.legs[0].mass + self.legs[1].mass,
-            self.lander.inertia,
-        )
-
-    def get_dimensional_properties(self) -> Tuple[float, float]:
-        """Get the l1 and l2 dimensions of the rocket
-        - l1: longitudinal distance from rocket center to where the nozzle force is applied
-        - l2: longitudinal distance from rocket center to height at which the side engine force is applied
-
-        l1 and l2 are measured along the centerline of the rocket
-
-        Returns:
-            Tuple[float, float]: l1, l2
-        """
-        l1 = (self.cfg.lander_length / 2) / self.cfg.scale
-        l2 = (self.cfg.side_engine_y_offset) / self.cfg.scale
-
-        return l1, l2
-
-    def get_landing_position(self) -> Tuple[float, float, float]:
-        """Get the landing point at the center of the barge, including tilt
-
-        Returns:
-            Tuple[float, float, float]: x, y, theta position of the barge
-        """
-        assert self.barge is not None, "Please call reset() first!"
-
-        pos = list(self.barge.position)
-        angle = copy.deepcopy(
-            self.barge.angle
-        )  # prevent users from changing the barge angle
-
-        pos[0] -= np.sin(angle) * self.cfg.barge_height / 2
-        pos[1] += np.cos(angle) * self.cfg.barge_height / 2
-
-        rocket_base_to_center_len = (
-            np.cos(self.cfg.leg_initial_angle * DEGTORAD) * (self.cfg.leg_height / 2)
-            + (self.cfg.lander_length / 2)
-        ) / self.cfg.scale
-        rocket_base_to_center_len += self.cfg.landing_vertical_calibration
-
-        rocket_base_to_center = [
-            -np.sin(angle) * rocket_base_to_center_len,
-            np.cos(angle) * rocket_base_to_center_len,
-        ]
-
-        pos[0] += rocket_base_to_center[0]
-        pos[1] += rocket_base_to_center[1]
-
-        pos.append(angle)
-
-        return pos
-
-    ## ENVIRONMENT HELPER FUNCTIONS
+        # Step through one action = [0, 0, 0] and return the state, reward etc.
+        return self._step(np.array([0, 0, 0]))[0]
 
     def _destroy(self):
-        if self.barge is None:
-            # nothing has been created yet
-            return
-
-        # clean up environment
+        if not self.main_base: return
         self.world.contactListener = None
         self._clean_particles(True)
-
-        self.world.DestroyBody(self.barge)
-        self.barge = None
+        self.world.DestroyBody(self.main_base)
+        self.main_base = None
         self.world.DestroyBody(self.lander)
         self.lander = None
-        self.world.DestroyBody(self.nozzle)
-        self.nozzle = None
         self.world.DestroyBody(self.legs[0])
         self.world.DestroyBody(self.legs[1])
-        self.world.DestroyBody(self.sea)
-        self.sea = None
 
-        self.lander_drawlist = []
+    def _step(self, action):
+        assert len(action) == 3  # Fe, Fs, psi
 
-    def __compute_reward(self, state: list, action: np.ndarray) -> float:
-        """Generate an environment reward based on the current state and actions
-        Our reward is based on the lunar lander continuous reward
+        # Check for contact with the ground
+        if (self.legs[0].ground_contact or self.legs[1].ground_contact) and self.CONTACT_FLAG == False:
+            self.CONTACT_FLAG = True
 
-        Args:
-            state (list): current state
-            action (np.ndarray): current action
+        # Shutdown all Engines upon contact with the ground
+        if self.CONTACT_FLAG:
+            action = [0, 0, 0]
 
-        Returns:
-            float: reward
-        """
-        landing_pos = self.get_landing_position()
-        x_pos_norm = (state[0] - landing_pos[0]) / self.cfg.width
-        y_pos_norm = (state[1] - landing_pos[1]) / self.cfg.height
+        if self.settings.get('Vectorized Nozzle'):
+            part = self.nozzle
+            part.angle = self.lander.angle + float(action[2])  # This works better than motorSpeed
+            if part.angle > NOZZLE_ANGLE_LIMIT:
+                part.angle = NOZZLE_ANGLE_LIMIT
+            elif part.angle < -NOZZLE_ANGLE_LIMIT:
+                part.angle = -NOZZLE_ANGLE_LIMIT
+            # part.joint.motorSpeed = float(action[2]) # action[2] is in radians
+            # That means having a value of 2*pi will rotate at 360 degrees / second
+            # A transformation can be done on the action, such as clipping the value
+        else:
+            part = self.lander
 
-        x_vel_norm = state[2] / self.cfg.width
-        y_vel_norm = state[3] / self.cfg.height
+        # "part" is used to decide where the main engine force is applied (whether it is applied to the bottom of the
+        # nozzle or the bottom of the first stage rocket
 
+        # Main Force Calculations
+        if self.remaining_fuel == 0:
+            logging.info("Strictly speaking, you're out of fuel, but act anyway.")
+        m_power = self.__main_engines_force_computation(action, rocketPart=part)
+        s_power, engine_dir = self.__side_engines_force_computation(action)
+
+        if self.settings.get('Gather Stats'):
+            self.action_history.append([m_power, s_power * engine_dir, part.angle])
+
+        # Decrease the rocket ass
+        self._decrease_mass(m_power, s_power)
+
+        # State Vector
+        self.previous_state = self.state  # Keep a record of the previous state
+        state, self.untransformed_state = self.__generate_state()  # Generate state
+        self.state = state  # Keep a record of the new state
+
+        # Rewards for reinforcement learning
+        reward = self.__compute_rewards(state, m_power, s_power,
+                                        part.angle)  # part angle can be used as part of the reward
+
+        # Check if the game is done, adjust reward based on the final state of the body
+        state_reset_conditions = [
+            self.game_over,  # Evaluated depending on body contact
+            abs(state[XX]) >= 1.0,  # Rocket moves out of x-space
+            state[YY] < 0 or state[YY] > 1.3,  # Rocket moves out of y-space or below barge
+            abs(state[THETA]) > THETA_LIMIT]  # Rocket tilts greater than the "controllable" limit
+        done = False
+        if any(state_reset_conditions):
+            done = True
+            reward = -10
+        if not self.lander.awake:
+            done = True
+            reward = +10
+
+        self._update_particles()
+
+        return np.array(state), reward, done, {}  # {} = info (required by parent class)
+
+    """ PROBLEM SPECIFIC - PHYSICS, STATES, REWARDS"""
+
+    def __main_engines_force_computation(self, action, rocketPart, *args):
+        # ----------------------------------------------------------------------------
+        # Nozzle Angle Adjustment
+
+        # For readability
+        sin = math.sin(rocketPart.angle)
+        cos = math.cos(rocketPart.angle)
+
+        # Random dispersion for the particles
+        dispersion = [self.np_random.uniform(-1.0, +1.0) / SCALE for _ in range(2)]
+
+        # Main engine
+        m_power = 0
+        try:
+            if (action[0] > 0.0):
+                # Limits
+                m_power = (np.clip(action[0], 0.0, 1.0) + 1.0) * 0.3  # 0.5..1.0
+                assert m_power >= 0.3 and m_power <= 1.0
+                # ------------------------------------------------------------------------
+                ox = sin * (4 / SCALE + 2 * dispersion[0]) - cos * dispersion[
+                    1]  # 4 is move a bit downwards, +-2 for randomness
+                oy = -cos * (4 / SCALE + 2 * dispersion[0]) - sin * dispersion[1]
+                impulse_pos = (rocketPart.position[0] + ox, rocketPart.position[1] + oy)
+
+                # rocketParticles are just a decoration, 3.5 is here to make rocketParticle speed adequate
+                p = self._create_particle(3.5, impulse_pos[0], impulse_pos[1], m_power,
+                                          radius=7)
+
+                rocketParticleImpulse = (ox * MAIN_ENGINE_POWER * m_power, oy * MAIN_ENGINE_POWER * m_power)
+                bodyImpulse = (-ox * MAIN_ENGINE_POWER * m_power, -oy * MAIN_ENGINE_POWER * m_power)
+                point = impulse_pos
+                wake = True
+
+                # Force instead of impulse. This enables proper scaling and values in Newtons
+                p.ApplyForce(rocketParticleImpulse, point, wake)
+                rocketPart.ApplyForce(bodyImpulse, point, wake)
+        except:
+            print("Error in main engine power.")
+
+        return m_power
+
+    def __side_engines_force_computation(self, action):
+        # ----------------------------------------------------------------------------
+        # Side engines
+        dispersion = [self.np_random.uniform(-1.0, +1.0) / SCALE for _ in range(2)]
+        sin = math.sin(self.lander.angle)  # for readability
+        cos = math.cos(self.lander.angle)
+        s_power = 0.0
+        y_dir = 1 # Positioning for the side Thrusters
+        engine_dir = 0
+        if (self.settings['Side Engines']):  # Check if side gas thrusters are enabled
+            if (np.abs(action[1]) > 0.5): # Have to be > 0.5
+                # Orientation engines
+                engine_dir = np.sign(action[1])
+                s_power = np.clip(np.abs(action[1]), 0.5, 1.0)
+                assert s_power >= 0.5 and s_power <= 1.0
+
+                # if (self.lander.worldCenter.y > self.lander.position[1]):
+                #     y_dir = 1
+                # else:
+                #     y_dir = -1
+
+                # Positioning
+                constant = (LANDER_LENGTH - SIDE_ENGINE_VERTICAL_OFFSET) / SCALE
+                dx_part1 = - sin * constant  # Used as reference for dy
+                dx_part2 = - cos * engine_dir * SIDE_ENGINE_AWAY / SCALE
+                dx = dx_part1 + dx_part2
+
+                dy = np.sqrt(
+                    np.square(constant) - np.square(dx_part1)) * y_dir - sin * engine_dir * SIDE_ENGINE_AWAY / SCALE
+
+                # Force magnitude
+                oy = -cos * dispersion[0] - sin * (3 * dispersion[1] + engine_dir * SIDE_ENGINE_AWAY / SCALE)
+                ox = sin * dispersion[0] - cos * (3 * dispersion[1] + engine_dir * SIDE_ENGINE_AWAY / SCALE)
+
+                # Impulse Position
+                impulse_pos = (self.lander.position[0] + dx,
+                               self.lander.position[1] + dy)
+
+                # Plotting purposes only
+                self.impulsePos = (self.lander.position[0] + dx, self.lander.position[1] + dy)
+
+                try:
+                    p = self._create_particle(1, impulse_pos[0], impulse_pos[1], s_power, radius=3)
+                    p.ApplyForce((ox * SIDE_ENGINE_POWER * s_power, oy * SIDE_ENGINE_POWER * s_power), impulse_pos,
+                                 True)
+                    self.lander.ApplyForce((-ox * SIDE_ENGINE_POWER * s_power, -oy * SIDE_ENGINE_POWER * s_power),
+                                           impulse_pos, True)
+                except:
+                    logging.error("Error due to Nan in calculating y during sqrt(l^2 - x^2). "
+                                  "x^2 > l^2 due to approximations on the order of approximately 1e-15.")
+
+        return s_power, engine_dir
+
+    def __generate_state(self):
+        # ----------------------------------------------------------------------------
+        # Update
+        self.world.Step(1.0 / FPS, 6 * 30, 6 * 30)
+
+        pos = self.lander.position
+        vel = self.lander.linearVelocity
+
+        target = (self.initial_barge_coordinates[1][0] - self.initial_barge_coordinates[0][0]) / 2 + \
+                 self.initial_barge_coordinates[0][0]
+        state = [
+            (pos.x - target) / (W / 2),
+            (pos.y - (self.maximum_barge_height + (LEG_DOWN / SCALE))) / (W / 2) - LANDING_VERTICAL_CALIBRATION,
+            # affects controller
+            # self.bargeHeight includes height of helipad
+            vel.x * (W / 2) / FPS,
+            vel.y * (H / 2) / FPS,
+            self.lander.angle,
+            # self.nozzle.angle,
+            20.0 * self.lander.angularVelocity / FPS,
+            1.0 if self.legs[0].ground_contact else 0.0,
+            1.0 if self.legs[1].ground_contact else 0.0
+        ]
+
+        untransformed_state = [pos.x, pos.y, vel.x, vel.y, self.lander.angle, self.lander.angularVelocity]
+
+        return state, untransformed_state
+
+    # ['dx','dy','x_vel','y_vel','theta','theta_dot','left_ground_contact','right_ground_contact']
+    def __compute_rewards(self, state, main_engine_power, side_engine_power, part_angle):
         reward = 0
-        shaping = (
-            -100 * np.sqrt(x_pos_norm**2 + y_pos_norm**2)
-            - 10 * np.sqrt(x_vel_norm**2 + y_vel_norm**2)
-            - 100 * abs(state[4])
-            + 20 * state[6]
-            + 20 * state[7]
-        )
+        shaping = -200 * np.sqrt(np.square(state[0]) + np.square(state[1])) \
+                  - 100 * np.sqrt(np.square(state[2]) + np.square(state[3])) \
+                  - 1000 * abs(state[4]) - 30 * abs(state[5]) \
+                  + 20 * state[6] + 20 * state[7]
+
+        # Introduce the concept of options by making reference markers wrt altitude and speed
+        # if (state[4] < 0.052 and state[4] > -0.052):
+        #     for i, (pos, speed, flag) in enumerate(zip(self.y_pos_ref, self.y_pos_speed, self.y_pos_flags)):
+        #         if state[1] < pos and state[3] > speed and flag is False:
+        #             shaping = shaping + 20
+        #             self.y_pos_flags[i] = True
+        #
+        #         elif state[1] < pos and state[3] < speed and flag is False:
+        #             shaping = shaping - 20
+        #             self.y_pos_flags[i] = True
+
+        # penalize increase in altitude
+        if state[3] > 0:
+            shaping = shaping - 1
 
         if self.prev_shaping is not None:
             reward = shaping - self.prev_shaping
         self.prev_shaping = shaping
 
-        reward -= action[0] * 0.30
-        reward -= action[1] * 0.03
+        # penalize the use of engines
+        reward += -main_engine_power * 0.3
+        if self.settings['Side Engines']:
+            reward += -side_engine_power * 0.3
+        # if self.settings['Vectorized Nozzle']:
+        #     reward += -100*np.abs(nozzle_angle) # Psi
 
-        return reward
+        return reward / 10
 
-    def __main_engines_force_computation(self, action):
-        cmd_engine_thrust = 0
+    """ PROBLEM SPECIFIC - RENDERING and OBJECT CREATION"""
 
-        if action[0] > 0:
-            sin = np.sin(self.nozzle.angle)
-            cos = np.cos(self.nozzle.angle)
+    # Problem specific - LINKED
+    def _create_terrain(self, chunks):
+        # Terrain Coordinates
+        # self.helipad_x1 = W / 5
+        # self.helipad_x2 = self.helipad_x1 + W / 5
+        divisor_constant = 8  # Control the height of the sea
+        self.helipad_y = H / divisor_constant
 
-            clipped_action = np.clip(
-                action[0],
-                a_min=self.cfg.main_engine_thrust_limits[0],
-                a_max=self.cfg.main_engine_thrust_limits[1],
-            )
-            cmd_engine_thrust = (
-                clipped_action * self.cfg.main_engine_thrust
-            )  # inertial forces scale with the cubic
+        # Terrain
+        # height = self.np_random.uniform(0, H / 6, size=(CHUNKS + 1,))
+        height = np.random.normal(H / divisor_constant, 0.5, size=(chunks + 1,))
+        chunk_x = [W / (chunks - 1) * i for i in range(chunks)]
+        # self.helipad_x1 = chunk_x[CHUNKS // 2 - 1]
+        # self.helipad_x2 = chunk_x[CHUNKS // 2 + 1]
+        height[chunks // 2 - 2] = self.helipad_y
+        height[chunks // 2 - 1] = self.helipad_y
+        height[chunks // 2 + 0] = self.helipad_y
+        height[chunks // 2 + 1] = self.helipad_y
+        height[chunks // 2 + 2] = self.helipad_y
 
-            # apply at the base of the lander, not on the nozzle
-            force_pos = (
-                self.lander.position[0]
-                + np.sin(self.lander.angle)
-                * (self.cfg.lander_length / 2)
-                / self.cfg.scale,
-                self.lander.position[1]
-                - np.cos(self.lander.angle)
-                * (self.cfg.lander_length / 2)
-                / self.cfg.scale,
-            )
-            force_vector = (-sin * cmd_engine_thrust, cos * cmd_engine_thrust)
+        return [0.33 * (height[i - 1] + height[i + 0] + height[i + 1]) for i in range(chunks)], chunk_x  # smoothed Y
 
-            self.lander.ApplyForce(force_vector, force_pos, True)
+    # Problem specific - LINKED
+    def _create_rocket(self, initial_coordinates=(W / 2, H / 1.2)):
+        body_color = (1, 1, 1)
+        # ----------------------------------------------------------------------------------------
+        # LANDER
 
-            # visual particle effects
-
-            # particle dispersion
-            angle_dispersion = self.np_random.uniform(-1.0, 1.0) * 15 * DEGTORAD
-            force_dispersion = self.np_random.uniform(0.7, 1.0)
-
-            particle_force_vector = (
-                np.sin(self.nozzle.angle + angle_dispersion)
-                * cmd_engine_thrust
-                * force_dispersion,
-                -np.cos(self.nozzle.angle + angle_dispersion)
-                * cmd_engine_thrust
-                * force_dispersion,
-            )
-
-            # scale with the lander_density
-            particle = self._create_particle(
-                self.cfg.lander_density
-                * np.pi
-                * (30 / self.cfg.lander_scaling) ** 2
-                / self.cfg.scale
-                ** 2,  # 30 is a 'look good' factor, chosen qualitatively for the mass scaling
-                force_pos[0],
-                force_pos[1]
-                - np.cos(self.lander.angle)
-                * (self.cfg.lander_length / 24)
-                / self.cfg.scale,  # offset to bottom of nozzle
-                1.5,  # particle life decrements by 0.1 every interval, dies at 0
-                radius=1.5 * self.cfg.lander_scaling,
-            )
-
-            particle.ApplyForce(particle_force_vector, force_pos, True)
-
-        return cmd_engine_thrust
-
-    def __side_engines_force_computation(self, action):
-        cmd_side_engine_thrust = 0
-        side_engine_dir = 1
-
-        if np.abs(action[1]) > 0:
-            clipped_action = np.clip(
-                action[1],
-                a_min=self.cfg.side_engine_thrust_limits[0],
-                a_max=self.cfg.side_engine_thrust_limits[1],
-            )
-            cmd_side_engine_thrust = (
-                clipped_action * self.cfg.side_engine_thrust
-            )  # inertial forces scale with the cubic
-
-            # convention is that Fs = Fl - Fr
-            # Therefore if sign is positive we fire the left thruster
-            side_engine_dir = np.sign(cmd_side_engine_thrust)
-            cmd_side_engine_thrust = np.abs(cmd_side_engine_thrust)
-
-            # shorten some equations
-            sin = np.sin(self.lander.angle)
-            cos = np.cos(self.lander.angle)
-
-            # apply at side_engine_y_offset up the lander from the center, with some left/right offset
-            force_pos = (
-                self.lander.position[0]
-                + (
-                    (-sin * self.cfg.side_engine_y_offset)
-                    - (side_engine_dir * cos * self.cfg.side_engine_x_offset)
-                )
-                / self.cfg.scale,
-                self.lander.position[1]
-                + (
-                    (cos * self.cfg.side_engine_y_offset)
-                    - (side_engine_dir * sin * self.cfg.side_engine_x_offset)
-                )
-                / self.cfg.scale,
-            )
-            force_vector = (
-                side_engine_dir * cos * cmd_side_engine_thrust,
-                side_engine_dir * sin * cmd_side_engine_thrust,
-            )
-
-            self.lander.ApplyForce(force_vector, force_pos, True)
-
-            # visual particle effects
-
-            # particle dispersion
-            angle_dispersion = self.np_random.uniform(-1.0, 1.0) * 10 * DEGTORAD
-            force_dispersion = self.np_random.uniform(0.4, 1.0)
-
-            # opposite direction to force applied on the lander
-            particle_force_vector = (
-                -side_engine_dir
-                * np.cos(self.lander.angle + angle_dispersion)
-                * cmd_side_engine_thrust
-                * force_dispersion,
-                -side_engine_dir
-                * np.sin(self.lander.angle + angle_dispersion)
-                * cmd_side_engine_thrust
-                * force_dispersion,
-            )
-
-            # scale with the lander_density
-            particle = self._create_particle(
-                self.cfg.lander_density
-                * np.pi
-                * (20 / self.cfg.lander_scaling) ** 2
-                / self.cfg.scale
-                ** 2,  # 20 is a 'look good' factor, chosen qualitatively for the mass scaling
-                force_pos[0],
-                force_pos[1],
-                0.5,  # particle 'life' decrements by 0.1 each interval, expires at 0
-                radius=0.75 * self.cfg.lander_scaling,
-            )
-            particle.ApplyForce(particle_force_vector, force_pos, True)
-
-        return cmd_side_engine_thrust, side_engine_dir
-
-    def __generate_state(self):
-        """Take one simulation step forward and return the new state
-
-        Returns:
-            list: x, y, x_dot, y_dot, theta, theta_dot, left_contact, right_contact
-        """
-        self.world.Step(1.0 / self.cfg.fps, 6 * 30, 6 * 30)
-
-        pos = self.lander.position
-        vel = self.lander.linearVelocity
-
-        state = [
-            pos.x,
-            pos.y,
-            vel.x,
-            vel.y,
-            self.lander.angle,
-            self.lander.angularVelocity,
-            1 if self.legs[0].ground_contact else 0,
-            1 if self.legs[1].ground_contact else 0,
-        ]
-
-        return state
-
-    def __apply_wind_disturbance(self):
-        """Apply a wind force to the lander along the x-axis"""
-        if self.args.enable_wind and not (
-            self.legs[0].ground_contact or self.legs[1].ground_contact
-        ):
-            wind_mag = (
-                np.tanh(
-                    np.sin(0.02 * self.wind_idx)
-                    + (np.sin(np.pi * 0.01 * self.wind_idx))
-                )
-                * self.cfg.wind_force
-            )
-            self.wind_idx += 1
-            self.lander.ApplyForceToCenter(
-                (wind_mag, 0.0),
-                True,
-            )
-
-    def __apply_barge_disturbance(self):
-        """Apply x, y, theta offsets to the barge from the initial position"""
-        if self.args.enable_moving_barge:
-            x_rate = 0.01
-            y_rate = 0.006
-            theta_rate = 0.004
-
-            barge_x = (
-                np.tanh(
-                    np.sin(x_rate * self.barge_idx)
-                    + (np.sin(np.pi * (x_rate / 2) * self.barge_idx))
-                )
-                * self.cfg.barge_width
-                / 16
-            ) + self.initial_barge_position[0]
-
-            barge_y = (
-                np.tanh(
-                    np.sin(y_rate * self.barge_idx)
-                    + (np.sin(np.pi * (y_rate / 2) * self.barge_idx))
-                )
-                * self.cfg.barge_height
-                / 4
-            ) + self.initial_barge_position[1]
-
-            barge_theta = (
-                np.tanh(
-                    np.sin(theta_rate * self.barge_idx)
-                    + (np.sin(np.pi * (theta_rate / 2) * self.barge_idx))
-                )
-                * 5
-                * DEGTORAD
-            ) + self.initial_barge_position[2]
-
-            self.barge_idx += 1
-
-            self.barge.position = (barge_x, barge_y)
-            self.barge.angle = barge_theta
-
-    ## RENDERING HELPERS
-
-    def _create_rocket(self, pos_x: float, pos_y: float):
-        """Create the dynamic rocket object"""
-
-        # variables
-        lander_body_color = (255, 255, 255)
-
-        # lander body
+        initial_x, initial_y = initial_coordinates
         self.lander = self.world.CreateDynamicBody(
-            position=(pos_x, pos_y),
-            angle=0.0,
+            position=(initial_x, initial_y),
+            angle=0,
             fixtures=fixtureDef(
-                shape=polygonShape(
-                    vertices=[
-                        (x / self.cfg.scale, y / self.cfg.scale)
-                        for x, y in self.cfg.lander_poly
-                    ]
-                ),
-                density=self.cfg.lander_density,
+                shape=polygonShape(vertices=[(x / SCALE, y / SCALE) for x, y in LANDER_POLY]),
+                density=5.0,
                 friction=0.1,
                 categoryBits=0x0010,
-                maskBits=0x0003,  # contact ground and sea
-                restitution=0.0,
-            ),
+                maskBits=0x001,  # collide only with ground
+                restitution=0.0)  # 0.99 bouncy
         )
-        self.lander.color1 = lander_body_color
+        self.lander.color1 = body_color
         self.lander.color2 = (0, 0, 0)
 
-        # lander legs
+        if isinstance(self.settings['Initial Force'], str):
+            self.lander.ApplyForceToCenter((
+                self.np_random.uniform(-INITIAL_RANDOM * 0.3, INITIAL_RANDOM * 0.3),
+                self.np_random.uniform(-1.3 * INITIAL_RANDOM, -INITIAL_RANDOM)
+            ), True)
+        else:
+            self.lander.ApplyForceToCenter(self.settings['Initial Force'], True)
+
+        # COG is set in the middle of the polygon by default. x = 0 = middle.
+        # self.lander.mass = 25
+        # self.lander.localCenter = (0, 3) # COG
+        # ----------------------------------------------------------------------------------------
+        # LEGS
         self.legs = []
         for i in [-1, +1]:
             leg = self.world.CreateDynamicBody(
-                # will move when we attach the revolute joint
-                position=(pos_x, pos_y),
-                angle=0,
+                position=(initial_x - i * LEG_AWAY / SCALE, initial_y),
+                angle=(i * 0.05),
                 fixtures=fixtureDef(
-                    # box assumes half-width and half-lengths
-                    shape=polygonShape(
-                        box=(
-                            self.cfg.leg_width / (2 * self.cfg.scale),
-                            self.cfg.leg_height / (2 * self.cfg.scale),
-                        )
-                    ),
-                    density=self.cfg.lander_density,  # cannot assume massless because for some reason we need density to apply torque?
-                    friction=0.1,
+                    shape=polygonShape(box=(LEG_W / SCALE, LEG_H / SCALE)),
+                    density=5.0,
                     restitution=0.0,
                     categoryBits=0x0020,
-                    maskBits=0x0003,  # contact ground and sea
-                ),
+                    maskBits=0x005)
             )
-
             leg.ground_contact = False
-            leg.color1 = lander_body_color
+            leg.color1 = body_color
             leg.color2 = (0, 0, 0)
-
-            # join legs to lander body
-            revolute_joint = revoluteJointDef(
+            rjd = revoluteJointDef(
                 bodyA=self.lander,
                 bodyB=leg,
-                # basically, put the legs at 1/4 ond 3/4 across the body (radius/2), and align the center
-                localAnchorA=(
-                    (i * self.cfg.lander_radius / 2) / self.cfg.scale,
-                    (-self.cfg.lander_length / 2 + self.cfg.leg_height / 2)
-                    / self.cfg.scale,
-                ),
-                localAnchorB=(0, (self.cfg.leg_height / 2) / self.cfg.scale),
+                localAnchorA=(-i * 0.3 / LANDER_CONSTANT, 0),
+                localAnchorB=(i * 0.5 / LANDER_CONSTANT, LEG_DOWN),
                 enableMotor=True,
                 enableLimit=True,
-                maxMotorTorque=self.cfg.leg_spring_torque,
-                motorSpeed=1.0 * i,
+                maxMotorTorque=LEG_SPRING_TORQUE,
+                motorSpeed=+0.3 * i  # low enough not to jump back into the sky
             )
-
-            # set angle limits
             if i == -1:
-                revolute_joint.lowerAngle = -(self.cfg.leg_initial_angle + 2) * DEGTORAD
-                revolute_joint.upperAngle = -self.cfg.leg_initial_angle * DEGTORAD
+                rjd.lowerAngle = 40 * DEGTORAD
+                rjd.upperAngle = 45 * DEGTORAD
             else:
-                revolute_joint.lowerAngle = self.cfg.leg_initial_angle * DEGTORAD
-                revolute_joint.upperAngle = (self.cfg.leg_initial_angle + 2) * DEGTORAD
-            leg.joint = self.world.CreateJoint(revolute_joint)
+                rjd.lowerAngle = -45 * DEGTORAD
+                rjd.upperAngle = -40 * DEGTORAD
+            leg.joint = self.world.CreateJoint(rjd)
             self.legs.append(leg)
-
-        # nozzle
+        # ----------------------------------------------------------------------------------------
+        # NOZZLE
         self.nozzle = self.world.CreateDynamicBody(
-            position=(pos_x, pos_y),
+            position=(initial_x, initial_y),
             angle=0.0,
             fixtures=fixtureDef(
-                shape=polygonShape(
-                    vertices=[
-                        (x / self.cfg.scale, y / self.cfg.scale)
-                        for x, y in self.cfg.nozzle_poly
-                    ]
-                ),
-                density=self.cfg.lander_density,
+                shape=polygonShape(vertices=[(x / SCALE, y / SCALE) for x, y in NOZZLE_POLY]),
+                density=5.0,
                 friction=0.1,
                 categoryBits=0x0040,
-                maskBits=0x0003,  # contact sea and ground
-                restitution=0.0,
-            ),
+                maskBits=0x003,  # collide only with ground
+                restitution=0.0)  # 0.99 bouncy
         )
-
         self.nozzle.color1 = (0, 0, 0)
         self.nozzle.color2 = (0, 0, 0)
-
-        # join nozzle to lander body
-        revolute_joint = revoluteJointDef(
+        rjd = revoluteJointDef(
             bodyA=self.lander,
             bodyB=self.nozzle,
-            localAnchorA=(0, -(self.cfg.lander_length / 2) / self.cfg.scale),
-            localAnchorB=(0, 0),
+            localAnchorA=(0, 0),
+            localAnchorB=(0, 0.2),
             enableMotor=True,
-            enableLimit=False,
-            maxMotorTorque=self.cfg.nozzle_torque,
+            enableLimit=True,
+            maxMotorTorque=NOZZLE_TORQUE,
             motorSpeed=0,
             referenceAngle=0,
-            lowerAngle=self.cfg.max_nozzle_angle
-            * self.cfg.nozzle_angle_limits[0],
-            upperAngle=self.cfg.max_nozzle_angle
-            * self.cfg.nozzle_angle_limits[1],
+            lowerAngle=-13 * DEGTORAD,  # +- 15 degrees limit applied in practice
+            upperAngle=13 * DEGTORAD
         )
-
-        self.nozzle.joint = self.world.CreateJoint(revolute_joint)
-
+        # The default behaviour of a revolute joint is to rotate without resistance.
+        self.nozzle.joint = self.world.CreateJoint(rjd)
+        # ----------------------------------------------------------------------------------------
+        # self.drawlist = [self.nozzle] + [self.lander] + self.legs
+        self.drawlist = self.legs + [self.nozzle] + [self.lander]
+        self.initial_mass = self.lander.mass
+        self.remaining_fuel = INITIAL_FUEL_MASS_PERCENTAGE * self.initial_mass
         return
 
+    # Problem specific - LINKED
     def _create_barge(self):
-        """Create the landing barge"""
-        # start it in the center of the screen
-        barge_center = (0.5 * self.cfg.width, self.cfg.barge_y_pos)
+        # Landing Barge
+        # The Barge can be modified in shape and angle
+        self.bargeHeight = self.helipad_y * (1 + 0.6)
 
-        self.barge = self.world.CreateStaticBody(
-            position=barge_center,
-            angle=0.0,
-            fixtures=fixtureDef(
-                shape=polygonShape(
-                    box=(self.cfg.barge_width / 2, self.cfg.barge_height / 2)
-                ),
-                categoryBits=0x0001,
-                maskBits=0xFFFF,
-                friction=self.cfg.barge_friction,
-            ),
-        )
-        self.barge.color1 = (40, 40, 40)
-        self.barge.color2 = (25, 25, 25)
+        # self.landingBargeCoordinates = [(self.helipad_x1, 0.1), (self.helipad_x2, 0.1),
+        #                                 (self.helipad_x2, self.bargeHeight), (self.helipad_x1, self.bargeHeight)]
+        assert BARGE_LENGTH_X1_RATIO < BARGE_LENGTH_X2_RATIO, 'Barge Length X1 must be 0-1 and smaller than X2'
 
-    def _create_sea_height(self, chunks: int) -> Tuple[list, list]:
-        """Create the sea height
+        x1 = BARGE_LENGTH_X1_RATIO*W
+        x2 = BARGE_LENGTH_X2_RATIO*W
+        self.landing_barge_coordinates = [(x1, 0.1), (x2, 0.1),
+                                          (x2, self.bargeHeight), (x1, self.bargeHeight)]
 
-        Args:
-            chunks (int): number of chunks to divide the sea into
+        self.initial_barge_coordinates = self.landing_barge_coordinates
+        self.minimum_barge_height = min(self.landing_barge_coordinates[2][1], self.landing_barge_coordinates[3][1])
+        self.maximum_barge_height = max(self.landing_barge_coordinates[2][1], self.landing_barge_coordinates[3][1])
+        # Used for the actual area inside the Barge
+        # barge_length = self.helipad_x2 - self.helipad_x1
+        # padRatio = 0.2
+        # self.landingPadCoordinates = [self.helipad_x1 + barge_length * padRatio,
+        #                               self.helipad_x2 - barge_length * padRatio]
+        barge_length = x2 - x1
+        padRatio = 0.2
+        self.landing_pad_coordinates = [x1 + barge_length * padRatio,
+                                        x2 - barge_length * padRatio]
 
-        Returns:
-            _type_: _description_
-        """
+        self.landing_coordinates = self.get_landing_coordinates()
 
-        # ocean height
-        sea_height = np.random.normal(self.cfg.barge_y_pos, 0.5, size=(chunks + 1,))
-        sea_x = [self.cfg.width / (chunks - 1) * i for i in range(chunks)]
-
-        # set the height of the sea near the barge to be the barge height
-        sea_height[chunks // 2 - 2] = self.cfg.barge_y_pos
-        sea_height[chunks // 2 - 1] = self.cfg.barge_y_pos
-        sea_height[chunks // 2 + 0] = self.cfg.barge_y_pos
-        sea_height[chunks // 2 + 1] = self.cfg.barge_y_pos
-        sea_height[chunks // 2 + 2] = self.cfg.barge_y_pos
-
-        smoothed_sea_height = [
-            0.33 * (sea_height[i - 1] + sea_height[i + 0] + sea_height[i + 1])
-            for i in range(chunks)
-        ]
-
-        return smoothed_sea_height, sea_x
-
-    def _create_environment(self, sea_y_values, sea_x_values):
-        """Create the environment polygons"""
-        assert (
-            len(sea_y_values) == self.cfg.sea_chunks_x
-            and len(sea_x_values) == self.cfg.sea_chunks_x
-        )
-        num_segments = self.cfg.sea_chunks_x
-
-        self.sea = self.world.CreateStaticBody(
-            # create bottom edge of the sea
-            shapes=edgeShape(vertices=[(0, 0), (self.cfg.width, 0)])
-        )
+    # Problem specific - LINKED
+    def _create_base_static_edges(self, CHUNKS, smooth_y, chunk_x):
+        # Sky
         self.sky_polys = []
-        self.sea_polys = [[] for _ in range(self.cfg.sea_chunks_y)]  # purely aesthetic
+        # Ground
+        self.ground_polys = []
+        self.sea_polys = [[] for _ in range(SEA_CHUNKS)]
 
-        for i in range(num_segments - 1):
-            # p1 and p2 define the top edge of the sea chunk
-            p1 = (sea_x_values[i], sea_y_values[i])
-            p2 = (sea_x_values[i + 1], sea_y_values[i + 1])
+        # Main Base
+        self.main_base = self.world.CreateStaticBody(shapes=edgeShape(vertices=[(0, 0), (W, 0)]))
+        for i in range(CHUNKS - 1):
+            p1 = (chunk_x[i], smooth_y[i])
+            p2 = (chunk_x[i + 1], smooth_y[i + 1])
+            self._create_static_edge(self.main_base, [p1, p2], 0.1)
+            self.sky_polys.append([p1, p2, (p2[0], H), (p1[0], H)])
 
-            # create collisions, add sky
-            self.sea.CreateEdgeFixture(
-                vertices=[p1, p2],
-                density=0,
-                friction=0.1,
-                categoryBits=0x0002,
-                maskBits=0x00FF,
-            )  # create sea collisions
-            self.sky_polys.append(
-                [p1, p2, (p2[0], self.cfg.height), (p1[0], self.cfg.height)]
-            )  # draw sky above sea
+            self.ground_polys.append([p1, p2, (p2[0], 0), (p1[0], 0)])
 
-            # make sea aesthetic by adding gradient polygons
-            for j in range(self.cfg.sea_chunks_y):
-                # draw from top to bottom
-                k = 1 - j / self.cfg.sea_chunks_y
-                self.sea_polys[j].append(
-                    [(p1[0], p1[1] * k), (p2[0], p2[1] * k), (p2[0], 0), (p1[0], 0)]
-                )
+            for j in range(SEA_CHUNKS - 1):
+                k = 1 - (j + 1) / SEA_CHUNKS
+                self.sea_polys[j].append([(p1[0], p1[1] * k), (p2[0], p2[1] * k), (p2[0], 0), (p1[0], 0)])
 
-    def _create_clouds(self):
-        self.clouds = []
-        for _ in range(10):
-            self.clouds.append(self._create_cloud([0.2, 0.4], [0.65, 0.7], 1))
-            self.clouds.append(self._create_cloud([0.7, 0.8], [0.75, 0.8], 1))
+        self._update_barge_static_edges()
 
-    def _create_cloud(self, x_range, y_range, y_variance=0.1):
-        cloud_poly = []
-        numberofdiscretepoints = 3
+    def _update_barge_static_edges(self):
+        if self.barge_base is not None:
+            self.world.DestroyBody(self.barge_base)
+        self.barge_base = None
+        barge_edge_coordinates = [self.landing_barge_coordinates[2], self.landing_barge_coordinates[3]]
+        self.barge_base = self.world.CreateStaticBody(shapes=edgeShape(vertices=barge_edge_coordinates))
+        self._create_static_edge(self.barge_base, barge_edge_coordinates, friction=BARGE_FRICTION)
 
-        initial_y = (
-            self.cfg.viewport_height * np.random.uniform(y_range[0], y_range[1])
-        ) / self.cfg.scale
-        initial_x = (
-            self.cfg.viewport_width * np.random.uniform(x_range[0], x_range[1])
-        ) / self.cfg.scale
-
-        y_coordinates = np.random.normal(0, y_variance, numberofdiscretepoints)
-        x_step = np.linspace(
-            initial_x, initial_x + np.random.uniform(1, 6), numberofdiscretepoints + 1
-        )
-
-        for i in range(0, numberofdiscretepoints):
-            cloud_poly.append(
-                (x_step[i], initial_y + np.sin(3.14 * 2 * i / 50) * y_coordinates[i])
-            )
-
-        return cloud_poly
+    @staticmethod
+    def _create_static_edge(base, vertices, friction):
+        base.CreateEdgeFixture(
+            vertices=vertices,
+            density=0,
+            friction=friction)
+        return
 
     def _create_particle(self, mass, x, y, ttl, radius=3):
         """
         Used for both the Main Engine and Side Engines
         :param mass: Different mass to represent different forces
         :param x: x position
-        :param y: y position
+        :param y:  y position
         :param ttl:
         :param radius:
         :return:
@@ -966,13 +589,12 @@ class RocketLander(gym.Env):
             position=(x, y),
             angle=0.0,
             fixtures=fixtureDef(
-                shape=circleShape(radius=radius / self.cfg.scale, pos=(0, 0)),
+                shape=circleShape(radius=radius / SCALE, pos=(0, 0)),
                 density=mass,
                 friction=0.1,
                 categoryBits=0x0100,
-                maskBits=0x0001,  # collide only with ground, not with the sea
-                restitution=0.3,
-            ),
+                maskBits=0x001,  # collide only with ground
+                restitution=0.3)
         )
         p.ttl = ttl  # ttl is decreased with every time step to determine if the particle should be destroyed
         self.particles.append(p)
@@ -980,268 +602,422 @@ class RocketLander(gym.Env):
         self._clean_particles(False)
         return p
 
-    def _update_particles(self):
-        for obj in self.particles:
-            obj.ttl -= 0.1
-            color_red = min(255, max(50, 50 + 255 * obj.ttl))
-            color_green_blue = min(255, max(50, 0.5 * 255 * obj.ttl))
-            obj.color1 = self._cast_tuple_to_int(
-                (color_red, color_green_blue, color_green_blue)
-            )
-            obj.color2 = self._cast_tuple_to_int(
-                (color_red, color_green_blue, color_green_blue)
-            )
-
-        self._clean_particles(False)
-
     def _clean_particles(self, all_particles):
         while self.particles and (all_particles or self.particles[0].ttl < 0):
             self.world.DestroyBody(self.particles.pop(0))
 
-    def render(self):
-        if self.render_mode == "rgb_array":
-            return self._render_frame()
+    def _create_cloud(self, x_range, y_range, y_variance=0.1):
+        self.cloud_poly = []
+        numberofdiscretepoints = 3
 
-    def _render_frame(self):
-        """Render a single frame"""
-        if self.window is None and self.render_mode == "human":
-            pygame.display.init()
-            self.window = pygame.display.set_mode(
-                (self.cfg.viewport_width, self.cfg.viewport_height)
-            )
-        if self.clock is None and self.render_mode == "human":
-            self.clock = pygame.time.Clock()
+        initial_y = (VIEWPORT_H * np.random.uniform(y_range[0], y_range[1], 1)) / SCALE
+        initial_x = (VIEWPORT_W * np.random.uniform(x_range[0], x_range[1], 1)) / SCALE
 
-        self.canvas = pygame.Surface(
-            (self.cfg.viewport_width, self.cfg.viewport_height)
-        )
-        pygame.transform.scale(self.canvas, (self.cfg.scale, self.cfg.scale))
-        self.canvas.fill((255, 255, 255))
+        y_coordinates = np.random.normal(0, y_variance, numberofdiscretepoints)
+        x_step = np.linspace(initial_x, initial_x + np.random.uniform(1, 6), numberofdiscretepoints + 1)
 
-        self._render_sky()
-        self._render_lander()
+        for i in range(0, numberofdiscretepoints):
+            self.cloud_poly.append((x_step[i], initial_y + math.sin(3.14 * 2 * i / 50) * y_coordinates[i]))
+
+        return self.cloud_poly
+
+    def _create_clouds(self):
+        self.clouds = []
+        for i in range(10):
+            self.clouds.append(self._create_cloud([0.2, 0.4], [0.65, 0.7], 1))
+            self.clouds.append(self._create_cloud([0.7, 0.8], [0.75, 0.8], 1))
+
+    def _decrease_mass(self, main_engine_power, side_engine_power):
+        x = np.array([float(main_engine_power), float(side_engine_power)])
+        consumed_fuel = 0.009 * np.sum(x * (MAIN_ENGINE_FUEL_COST, SIDE_ENGINE_FUEL_COST)) / SCALE
+        self.lander.mass = self.lander.mass - consumed_fuel
+        self.remaining_fuel -= consumed_fuel
+        if self.remaining_fuel < 0:
+            self.remaining_fuel = 0
+
+    @staticmethod
+    def _create_labels(labels):
+        labels_dict = {}
+        y_spacing = 0
+        for text in labels:
+            labels_dict[text] = pyglet.text.Label(text, font_size=15, x=W / 2, y=H / 2,  # - y_spacing*H/10,
+                                                  anchor_x='right', anchor_y='center', color=(0, 255, 0, 255))
+            y_spacing += 1
+        return labels_dict
+
+    """ RENDERING """
+
+    def _render(self, mode='human', close=False):
+        if close:
+            if self.viewer is not None:
+                self.viewer.close()
+                self.viewer = None
+            return
+
+        # This can be removed since the code is being update to utilize env.refresh() instead
+        # Kept here for backwards compatibility purposes
+        # Viewer Creation
+        if self.viewer is None:  # Initial run will enter here
+            self.viewer = rendering.Viewer(VIEWPORT_W, VIEWPORT_H)
+            self.viewer.set_bounds(0, W, 0, H)
+
         self._render_environment()
+        self._render_lander()
+        self.draw_marker(x=self.lander.worldCenter.x, y=self.lander.worldCenter.y)  # Center of Gravity
+        # self.drawMarker(x=self.impulsePos[0], y=self.impulsePos[1])              # Side Engine Forces Positions
+        # self.drawMarker(x=self.lander.position[0], y=self.lander.position[1])    # (0,0) position
 
-        if self.args.render_lander_center_position:
-            self._draw_marker(
-                x=self.lander.position.x,
-                y=self.lander.position.y,
-                theta=self.lander.angle,
-                color=(0, 0, 0),
-            )
-        if self.args.render_landing_position:
-            landing_pos = self.get_landing_position()
-            self._draw_marker(
-                x=landing_pos[0],
-                y=landing_pos[1],
-                theta=landing_pos[2],
-                color=(11, 218, 81),
-            )
+        # Commented out to be able to draw from outside the class using self.refresh
+        # return self.viewer.render(return_rgb_array=mode == 'rgb_array')
 
-        self.canvas = pygame.transform.flip(self.canvas, False, True)
+    def refresh(self, mode='human', render=False):
+        """
+        Used instead of _render in order to draw user defined drawings from controllers, e.g. trajectories
+        for the MPC or a a marking e.g. Center of Gravity
+        :param mode:
+        :param render:
+        :return: Viewer
+        """
+        # Viewer Creation
+        if self.viewer is None:  # Initial run will enter here
+            self.viewer = rendering.Viewer(VIEWPORT_W, VIEWPORT_H)
+            self.viewer.set_bounds(0, W, 0, H)
 
-        if self.render_mode == "human":
-            # copies our drawings from canvas to visible window
-            self.window.blit(self.canvas, self.canvas.get_rect())
-            pygame.event.pump()
-            pygame.display.update()
-
-            # to ensure that human rendering occurs at a predefined framerate
-            self.clock.tick(self.metadata["render_fps"])
-        else:  # rgb_array
-            return np.transpose(
-                np.array(pygame.surfarray.pixels3d(self.canvas)), axes=(1, 0, 2)
-            )
+        if render:
+            self.render()
+        return self.viewer.render(return_rgb_array=mode == 'rgb_array')
 
     def _render_lander(self):
-        for obj in self.particles + self.lander_drawlist:
+        # --------------------------------------------------------------------------------------------------------------
+        # Rocket Lander
+        # --------------------------------------------------------------------------------------------------------------
+        # Lander and Particles
+        for obj in self.particles + self.drawlist:
             for f in obj.fixtures:
                 trans = f.body.transform
                 if type(f.shape) is circleShape:
-                    pygame.draw.circle(
-                        self.canvas,
-                        color=obj.color1,
-                        center=trans * f.shape.pos * self.cfg.scale,
-                        radius=f.shape.radius * self.cfg.scale,
-                    )
-                    pygame.draw.circle(
-                        self.canvas,
-                        color=obj.color2,
-                        center=trans * f.shape.pos * self.cfg.scale,
-                        radius=f.shape.radius * self.cfg.scale,
-                    )
+                    t = rendering.Transform(translation=trans * f.shape.pos)
+                    self.viewer.draw_circle(f.shape.radius, 20, color=obj.color1).add_attr(t)
+                    self.viewer.draw_circle(f.shape.radius, 20, color=obj.color2, filled=False,
+                                            linewidth=2).add_attr(t)
                 else:
                     # Lander
                     path = [trans * v for v in f.shape.vertices]
+                    self.viewer.draw_polygon(path, color=obj.color1)
+                    path.append(path[0])
+                    self.viewer.draw_polyline(path, color=obj.color2, linewidth=2)
 
-                    pygame.draw.polygon(
-                        self.canvas,
-                        color=obj.color1,
-                        points=self._scale_list_of_tuples(path, self.cfg.scale),
-                    )
-                    pygame.draw.aalines(
-                        self.canvas,
-                        color=obj.color2,
-                        points=self._scale_list_of_tuples(path, self.cfg.scale),
-                        closed=True,
-                    )
+    def _render_clouds(self):
+        for x in self.clouds:
+            self.viewer.draw_polygon(x, color=(1.0, 1.0, 1.0))
 
-    def _render_sky(self):
-        for p in self.sky_polys:
-            pygame.draw.polygon(
-                self.canvas,
-                color=(212, 234, 255),
-                points=self._scale_list_of_tuples(p, self.cfg.scale),
-            )
+    def _update_particles(self):
+        for obj in self.particles:
+            obj.ttl -= 0.1
+            obj.color1 = (max(0.2, 0.2 + obj.ttl), max(0.2, 0.5 * obj.ttl), max(0.2, 0.5 * obj.ttl))
+            obj.color2 = (max(0.2, 0.2 + obj.ttl), max(0.2, 0.5 * obj.ttl), max(0.2, 0.5 * obj.ttl))
 
-        if self.cfg.clouds:
-            for x in self.clouds:
-                pygame.draw.polygon(
-                    self.canvas,
-                    color=(255, 255, 255),
-                    points=self._scale_list_of_tuples(x, self.cfg.scale),
-                )
+        self._clean_particles(False)
 
     def _render_environment(self):
-        """Render the sea and barge"""
+        # --------------------------------------------------------------------------------------------------------------
+        # ENVIRONMENT
+        # --------------------------------------------------------------------------------------------------------------
+        # Sky Boundaries
+
+        for p in self.sky_polys:
+            self.viewer.draw_polygon(p, color=(0.83, 0.917, 1.0))
+
+        # Landing Barge
+        self.viewer.draw_polygon(self.landing_barge_coordinates, color=(0.1, 0.1, 0.1))
+
+        for g in self.ground_polys:
+            self.viewer.draw_polygon(g, color=(0, 0.5, 1.0))
+
         for i, s in enumerate(self.sea_polys):
-            k = 1 - (i + 1) / self.cfg.sea_chunks_y
+            k = 1 - (i + 1) / SEA_CHUNKS
             for poly in s:
-                pygame.draw.polygon(
-                    self.canvas,
-                    color=self._cast_tuple_to_int(
-                        (0, 0.5 * 255 * k, min(255, 255 * k + 128))
-                    ),
-                    points=self._scale_list_of_tuples(poly, self.cfg.scale),
-                )
+                self.viewer.draw_polygon(poly, color=(0, 0.5 * k, 1.0 * k + 0.5))
 
-        # barge
-        for f in self.barge.fixtures:
-            trans = f.body.transform
+        if self.settings["Clouds"]:
+            self._render_clouds()
 
-            path = [trans * v for v in f.shape.vertices]
+        # Landing Flags
+        for x in self.landing_pad_coordinates:
+            flagy1 = self.landing_barge_coordinates[3][1]
+            flagy2 = self.landing_barge_coordinates[2][1] + 25 / SCALE
 
-            pygame.draw.polygon(
-                self.canvas,
-                color=self.barge.color1,
-                points=self._scale_list_of_tuples(path, self.cfg.scale),
-            )
-            pygame.draw.aalines(
-                self.canvas,
-                color=self.barge.color2,
-                points=self._scale_list_of_tuples(path, self.cfg.scale),
-                closed=True,
-            )
+            polygon_coordinates = [(x, flagy2), (x, flagy2 - 10 / SCALE), (x + 25 / SCALE, flagy2 - 5 / SCALE)]
+            self.viewer.draw_polygon(polygon_coordinates, color=(1, 0, 0))
+            self.viewer.draw_polyline(polygon_coordinates, color=(0, 0, 0))
+            self.viewer.draw_polyline([(x, flagy1), (x, flagy2)], color=(0.5, 0.5, 0.5))
 
-        # landing flags
-        trans = self.barge.fixtures[0].body.transform  # should only be one
+        # --------------------------------------------------------------------------------------------------------------
 
-        for ind in [-1, +1]:
-            # set some x and y points for the flag
-            flag_x = ind * (3 / 4) * self.cfg.barge_width / 2
-            flag_y = self.cfg.barge_height / 2
+    """ CALLABLE DURING RUNTIME """
 
-            # these units are meters
-            flag_pole_length = 0.8
-            flag_triangle_height = 0.3
-            flag_triangle_width = 0.8
-
-            flag_triangle = [
-                (flag_x, flag_y + flag_pole_length),
-                (flag_x, flag_y + flag_pole_length + flag_triangle_height),
-                (
-                    flag_x + flag_triangle_width,
-                    flag_y + flag_pole_length + flag_triangle_height / 2,
-                ),
-            ]
-
-            # flag_triangle = polygonShape(vertices=flag_triangle)
-            flag_triangle = [trans * v for v in flag_triangle]
-
-            pygame.draw.polygon(
-                self.canvas,
-                color=(255, 0, 0),
-                points=self._scale_list_of_tuples(flag_triangle, self.cfg.scale),
-            )
-
-            pygame.draw.lines(
-                self.canvas,
-                color=(0, 0, 0),
-                closed=True,
-                points=self._scale_list_of_tuples(flag_triangle, self.cfg.scale),
-            )
-
-            flag_pole = [
-                trans * v
-                for v in [(flag_x, flag_y), (flag_x, flag_y + flag_pole_length)]
-            ]
-
-            pygame.draw.lines(
-                self.canvas,
-                color=(128, 128, 128),
-                closed=True,
-                points=self._scale_list_of_tuples(flag_pole, self.cfg.scale),
-            )
-
-    def _draw_marker(self, x, y, theta, color: Tuple[int, ...] = (0, 0, 0)):
-        """Draw a marker
-
-        Args:
-            x (_type_): _description_
-            y (_type_): _description_
-            theta (_type_): _description_
+    def draw_marker(self, x, y):
         """
-
+        Draws a black '+' sign at the x and y coordinates.
+        :param x: normalized x position (0-1)
+        :param y: normalized y position (0-1)
+        :return:
+        """
         offset = 0.2
+        self.viewer.draw_polyline([(x, y - offset), (x, y + offset)], linewidth=2)
+        self.viewer.draw_polyline([(x - offset, y), (x + offset, y)], linewidth=2)
 
-        cross_vert = [
-            (x + offset * np.sin(theta), y - offset * np.cos(theta)),
-            (x - offset * np.sin(theta), y + offset * np.cos(theta)),
-        ]
+    def draw_polygon(self, color=(0.2, 0.2, 0.2), **kwargs):
+        # path expected as (x,y)
+        if self.viewer is not None:
+            path = kwargs.get('path')
+            if path is not None:
+                self.viewer.draw_polygon(path, color=color)
+            else:
+                x = kwargs.get('x')
+                y = kwargs.get('y')
+                self.viewer.draw_polygon([(xx, yy) for xx, yy in zip(x, y)], color=color)
 
-        cross_horiz = [
-            (x - offset * np.cos(theta), y - offset * np.sin(theta)),
-            (x + offset * np.cos(theta), y + offset * np.sin(theta)),
-        ]
+    def draw_line(self, x, y, color=(0.2, 0.2, 0.2)):
+        self.viewer.draw_polyline([(xx, yy) for xx, yy in zip(x, y)], linewidth=2, color=color)
 
-        pygame.draw.lines(
-            self.canvas,
-            color=color,
-            closed=False,
-            points=self._scale_list_of_tuples(cross_horiz, self.cfg.scale),
-            width=2,
-        )
-        pygame.draw.lines(
-            self.canvas,
-            color=color,
-            closed=False,
-            points=self._scale_list_of_tuples(cross_vert, self.cfg.scale),
-            width=2,
-        )
+    def move_barge(self, x_movement, left_height, right_height):
+        self.landing_barge_coordinates[0] = (
+            self.landing_barge_coordinates[0][0] + x_movement, self.landing_barge_coordinates[0][1])
+        self.landing_barge_coordinates[1] = (
+            self.landing_barge_coordinates[1][0] + x_movement, self.landing_barge_coordinates[1][1])
+        self.landing_barge_coordinates[2] = (
+            self.landing_barge_coordinates[2][0] + x_movement, self.landing_barge_coordinates[2][1] + right_height)
+        self.landing_barge_coordinates[3] = (
+            self.landing_barge_coordinates[3][0] + x_movement, self.landing_barge_coordinates[3][1] + left_height)
+        self.minimum_barge_height = min(self.landing_barge_coordinates[2][1], self.landing_barge_coordinates[3][1])
+        self.maximum_barge_height = max(self.landing_barge_coordinates[2][1], self.landing_barge_coordinates[3][1])
+        self._update_barge_static_edges()
+        self.update_landing_coordinate(x_movement, x_movement)
+        self.landing_coordinates = self.get_landing_coordinates()
+        return self.landing_coordinates
 
-    ## MISC. HELPERS
+    def get_consumed_fuel(self):
+        if self.lander is not None:
+            return self.initial_mass - self.lander.mass
+
+    def get_landing_coordinates(self):
+        x = (self.landing_barge_coordinates[1][0] - self.landing_barge_coordinates[0][0]) / 2 + \
+            self.landing_barge_coordinates[0][0]
+        y = abs(self.landing_barge_coordinates[2][1] - self.landing_barge_coordinates[3][1]) / 2 + \
+            min(self.landing_barge_coordinates[2][1], self.landing_barge_coordinates[3][1])
+        return [x, y]
+
+    def get_barge_top_edge_points(self):
+        return flatten_array(self.landing_barge_coordinates[2:])
+
+    def get_state_with_barge_and_landing_coordinates(self, untransformed_state=False):
+        if untransformed_state:
+            state = self.untransformed_state
+        else:
+            state = self.state
+        return flatten_array([state, [self.remaining_fuel,
+                                      self.lander.mass],
+                                      self.get_barge_top_edge_points(),
+                                      self.get_landing_coordinates()])
+
+    def get_barge_to_ground_distance(self):
+        """
+        Calculates the max barge height offset from the start to end
+        :return:
+        """
+        initial_barge_coordinates = np.array(self.initial_barge_coordinates)
+        current_barge_coordinates = np.array(self.landing_barge_coordinates)
+
+        barge_height_offset = initial_barge_coordinates[:, 1] - current_barge_coordinates[:, 1]
+        return np.max(barge_height_offset)
+
+    def update_landing_coordinate(self, left_landing_x, right_landing_x):
+        self.landing_pad_coordinates[0] += left_landing_x
+        self.landing_pad_coordinates[1] += right_landing_x
+
+        x_lim_1 = self.landing_barge_coordinates[0][0]
+        x_lim_2 = self.landing_barge_coordinates[1][0]
+
+        if self.landing_pad_coordinates[0] <= x_lim_1:
+            self.landing_pad_coordinates[0] = x_lim_1
+
+        if self.landing_pad_coordinates[1] >= x_lim_2:
+            self.landing_pad_coordinates[1] = x_lim_2
+
+    def get_action_history(self):
+        return self.action_history
+
+    def clear_forces(self):
+        self.world.ClearForces()
+
+    def get_nozzle_and_lander_angles(self):
+        assert self.nozzle is not None, "Method called prematurely before initialization"
+        return np.array([self.nozzle.angle, self.lander.angle, self.nozzle.joint.angle])
+
+    def evaluate_kinematics(self, actions):
+        Fe, Fs, psi = actions
+        theta = self.untransformed_state[THETA]
+        # -----------------------------
+        ddot_x = (Fe * theta + Fe * psi + Fs) / MASS
+        ddot_y = (Fe - Fe * theta * psi - Fs * theta - MASS * GRAVITY) / MASS
+        ddot_theta = (Fe * psi * (L1 + LN) - L2 * Fs) / INERTIA
+        return ddot_x, ddot_y, ddot_theta
+
+    def apply_random_x_disturbance(self, epsilon, left_or_right, x_force=2000):
+        if np.random.rand() < epsilon:
+            if left_or_right:
+                self.apply_disturbance('random', x_force, 0)
+            else:
+                self.apply_disturbance('random', -x_force, 0)
+
+    def apply_random_y_disturbance(self, epsilon, y_force=2000):
+        if np.random.rand() < epsilon:
+            self.apply_disturbance('random', 0, -y_force)
+
+    def move_barge_randomly(self, epsilon, left_or_right, x_movement=0.05):
+        if np.random.rand() < epsilon:
+            if left_or_right:
+                self.move_barge(x_movement=x_movement, left_height=0, right_height=0)
+            else:
+                self.move_barge(x_movement=-x_movement, left_height=0, right_height=0)
+
+    def adjust_dynamics(self, **kwargs):
+        if kwargs.get('mass'):
+            self.lander.mass = kwargs['mass']
+
+        if kwargs.get('x_dot'):
+            self.lander.linearVelocity.x = kwargs['x_dot']
+
+        if kwargs.get('y_dot'):
+            self.lander.linearVelocity.y = kwargs['y_dot']
+
+        if kwargs.get('theta'):
+            self.lander.angle = kwargs['theta']
+
+        if kwargs.get('theta_dot'):
+            self.lander.angularVelocity = kwargs['theta_dot']
+
+        self.state, self.untransformed_state = self.__generate_state()
+
+    def apply_disturbance(self, force, *args):
+        if force is not None:
+            if isinstance(force, str):
+                x, y = args
+                self.lander.ApplyForceToCenter((
+                    self.np_random.uniform(x),
+                    self.np_random.uniform(y)
+                ), True)
+            elif isinstance(force, tuple):
+                self.lander.ApplyForceToCenter(force, True)
 
     @staticmethod
-    def _cast_tuple_to_int(t: Tuple) -> Tuple:
-        return tuple([int(item) for item in t])
+    def compute_cost(state, untransformed_state=False, *args):
+        len_state = len(state)
+        cost_matrix = np.ones(len_state)
+        cost_matrix[XX] = 10
+        cost_matrix[X_DOT] = 5
+        cost_matrix[Y_DOT] = 10
+        cost_matrix[THETA] = 4
+        cost_matrix[THETA_DOT] = 10
 
-    @staticmethod
-    def _scale_list_of_tuples(l: List[Tuple], scale: int) -> List[Tuple]:
-        out = []
-        for t in l:
-            out.append(tuple([item * scale for item in t]))
-        return out
+        state_target = np.zeros(len_state)
+        if untransformed_state is True:
+            state_target[XX] = args[XX]
+            state_target[YY] = args[YY]
 
-    def adjust_dynamics(self, body, **kwargs):
-        """Adjust dynamic parameters of a body"""
-        # position is weird, only doing velocities and angles
-        if kwargs.get("x_dot"):
-            body.linearVelocity.x = kwargs["x_dot"]
-        if kwargs.get("y_dot"):
-            body.linearVelocity.y = kwargs["y_dot"]
-        if kwargs.get("theta"):
-            body.angle = kwargs["theta"]
-        if kwargs.get("theta_dot"):
-            body.angularVelocity = kwargs["theta_dot"]
+        ss = (state_target - abs(np.array(state)))
+        return np.dot(ss, cost_matrix)
 
-        self.state = self.__generate_state()
+
+def get_state_sample(samples, normal_state=True, untransformed_state=True):
+    simulation_settings = {'Side Engines': True,
+                           'Clouds': False,
+                           'Vectorized Nozzle': True,
+                           'Graph': False,
+                           'Render': False,
+                           'Starting Y-Pos Constant': 1,
+                           'Initial Force': 'random',
+                           'Rows': 1,
+                           'Columns': 2}
+    env = RocketLander(simulation_settings)
+    env.reset()
+    state_samples = []
+    while len(state_samples) < samples:
+        f_main = np.random.uniform(0, 1)
+        f_side = np.random.uniform(-1, 1)
+        psi = np.random.uniform(-90 * DEGTORAD, 90 * DEGTORAD)
+        action = [f_main, f_side, psi]
+        s, r, done, info = env.step(action)
+        if normal_state:
+            state_samples.append(s)
+        else:
+            state_samples.append(
+                env.get_state_with_barge_and_landing_coordinates(untransformed_state=untransformed_state))
+        if done:
+            env.reset()
+    env.close()
+    return state_samples
+
+
+def flatten_array(the_list):
+    return list(chain.from_iterable(the_list))
+
+
+def compute_derivatives(state, action, sample_time=1 / FPS):
+    simulation_settings = {'Side Engines': True,
+                           'Clouds': False,
+                           'Vectorized Nozzle': True,
+                           'Graph': False,
+                           'Render': False,
+                           'Starting Y-Pos Constant': 1,
+                           'Initial Force': (0, 0)}
+
+    eps = sample_time
+    len_state = len(state)
+    len_action = len(action)
+    ss = np.tile(state, (len_state, 1))
+    x1 = ss + np.eye(len_state) * eps
+    x2 = ss - np.eye(len_state) * eps
+    aa = np.tile(action, (len_state, 1))
+    f1 = simulate_kinematics(x1, aa, simulation_settings)
+    f2 = simulate_kinematics(x2, aa, simulation_settings)
+    delta_x = f1 - f2
+    delta_a = delta_x / 2 / eps  # Jacobian
+
+    x3 = np.tile(state, (len_action, 1))
+    u1 = np.tile(action, (len_action, 1)) + np.eye(len_action) * eps
+    u2 = np.tile(action, (len_action, 1)) - np.eye(len_action) * eps
+    f1 = simulate_kinematics(x3, u1, simulation_settings)
+    f2 = simulate_kinematics(x3, u2, simulation_settings)
+    delta__b = (f1 - f2) / 2 / eps
+    delta__b = delta__b.T
+
+    return delta_a, delta__b, delta_x
+
+
+def simulate_kinematics(state, action, simulation_settings, render=False):
+    next_state = np.zeros(state.shape)
+    envs = [None for _ in range(len(state))]  # separate environment for memory management
+    for i, (s, a) in enumerate(zip(state, action)):
+        x, y, x_dot, y_dot, theta, theta_dot = s
+        simulation_settings['Initial Coordinates'] = (x, y, 0, False)
+
+        envs[i] = RocketLander(simulation_settings)
+        if render:
+            envs[i].render()
+        envs[i].adjust_dynamics(y_dot=y_dot, x_dot=x_dot, theta=theta, theta_dot=theta_dot)
+
+        envs[i].step(a)
+        if render:
+            envs[i].render()
+        next_state[i, :] = envs[i].untransformed_state
+        envs[i].close()
+
+    return next_state
+
+
+def swap_array_values(array, indices_to_swap):
+    for i, j in indices_to_swap:
+        array[i], array[j] = array[j], array[i]
+    return array
